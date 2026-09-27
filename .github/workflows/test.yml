@@ -79,6 +79,35 @@ jobs:
         working-directory: packages/opencode
         run: bun run test:httpapi
 
+  path-contract:
+    name: path contract (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Bun
+        uses: ./.github/actions/setup-bun
+
+      - name: Configure git identity
+        run: |
+          git config --global user.email "bot@opencode.ai"
+          git config --global user.name "opencode"
+
+      - name: Run path contract tests
+        run: |
+          bun --cwd packages/core test test/filesystem/filesystem.test.ts
+          bun --cwd packages/opencode test test/tool/external-directory.test.ts test/cli/serve/serve-process.test.ts
+
   e2e:
     name: e2e (${{ matrix.settings.name }})
     strategy:

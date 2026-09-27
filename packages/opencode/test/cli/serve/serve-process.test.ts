@@ -8,7 +8,10 @@
 import { describe, expect } from "bun:test"
 import { Effect } from "effect"
 import { HttpClient } from "effect/unstable/http"
+import fs from "node:fs/promises"
+import path from "node:path"
 import { cliIt } from "../../lib/cli-process"
+import { testProviderConfig } from "../../lib/test-provider"
 
 describe("opencode serve (subprocess)", () => {
   // Smoke test: server starts, binds a port, and /global/health responds.
@@ -55,6 +58,53 @@ describe("opencode serve (subprocess)", () => {
         // (typically 143 on POSIX). We just require resolution within a sane
         // window — anything else means the kill didn't take.
         expect(typeof code === "number" || code === null).toBe(true)
+      }),
+    60_000,
+  )
+
+  cliIt.live(
+    "keeps symlinked workdirs inside while prompting for true external paths",
+    ({ home, llm, opencode }) =>
+      Effect.gen(function* () {
+        const workspace = path.join(home, "workspace")
+        const alias = path.join(home, "workspace-link")
+        const external = path.join(home, "external")
+        const inside = path.join(alias, "inside.txt")
+        const outside = path.join(external, "secret.txt")
+
+        yield* Effect.promise(async () => {
+          await fs.mkdir(workspace)
+          await fs.mkdir(external)
+          await Bun.write(path.join(workspace, "inside.txt"), "inside")
+          await Bun.write(outside, "secret")
+          await fs.symlink(workspace, alias, process.platform === "win32" ? "junction" : "dir")
+        })
+
+        const server = yield* opencode.serve({
+          env: {
+            OPENCODE_CONFIG_CONTENT: JSON.stringify({
+              ...testProviderConfig(llm.url),
+              permission: { read: "allow", external_directory: "ask" },
+            }),
+          },
+        })
+        const remote = ["--attach", server.url, "--dir", alias, "--"]
+
+        yield* llm.tool("read", { filePath: inside })
+        yield* llm.text("read inside workspace")
+        const insideResult = yield* opencode.run("read the workspace file", { extraArgs: remote })
+
+        opencode.expectExit(insideResult, 0)
+        expect(insideResult.stderr).not.toContain("permission requested: external_directory")
+        expect(yield* llm.calls).toBeGreaterThanOrEqual(2)
+
+        yield* llm.reset
+        yield* llm.tool("read", { filePath: outside })
+        yield* llm.text("external request rejected")
+        const outsideResult = yield* opencode.run("read the external file", { extraArgs: remote })
+
+        opencode.expectExit(outsideResult, 0)
+        expect(outsideResult.stderr).toContain("permission requested: external_directory")
       }),
     60_000,
   )

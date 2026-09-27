@@ -1,5 +1,5 @@
 import { NodeFileSystem } from "@effect/platform-node"
-import { dirname, isAbsolute, join, relative, resolve as pathResolve, sep } from "path"
+import { basename, dirname, isAbsolute, join, relative, resolve as pathResolve, sep } from "path"
 import { realpathSync } from "fs"
 import * as NFS from "fs/promises"
 import { lookup } from "mime-types"
@@ -232,6 +232,25 @@ export namespace FSUtil {
       return realpathSync.native(resolved)
     } catch {
       return resolved
+    }
+  }
+
+  export function canonicalPath(p: string): string {
+    let current = pathResolve(windowsPath(p))
+    const tail: string[] = []
+
+    while (true) {
+      try {
+        return normalizePath(join(realpathSync.native(current), ...tail))
+      } catch (error) {
+        const code = error instanceof Error && "code" in error ? error.code : undefined
+        if (code !== "ENOENT" && code !== "ENOTDIR") throw error
+
+        const parent = dirname(current)
+        if (parent === current) return normalizePath(current)
+        tail.unshift(basename(current))
+        current = parent
+      }
     }
   }
 

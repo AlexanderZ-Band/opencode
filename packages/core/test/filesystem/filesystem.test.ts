@@ -4,6 +4,7 @@ import { LayerNodePlatform } from "@opencode-ai/core/effect/app-node-platform"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { testEffect } from "../lib/effect"
+import fs from "node:fs/promises"
 import path from "path"
 
 const live = LayerNode.compile(LayerNode.group([FSUtil.node, LayerNodePlatform.filesystem]))
@@ -383,5 +384,24 @@ describe("FSUtil", () => {
       expect(FSUtil.overlaps("/a/b", "/a/bad")).toBe(false)
       if (process.platform === "win32") expect(FSUtil.overlaps("C:\\a", "D:\\b")).toBe(false)
     })
+
+    it(
+      "canonicalPath resolves a symlinked ancestor for a missing descendant",
+      Effect.gen(function* () {
+        const filesys = yield* FileSystem.FileSystem
+        const tmp = yield* filesys.makeTempDirectoryScoped()
+        const physical = path.join(tmp, "physical")
+        const alias = path.join(tmp, "alias")
+        const target = path.join(alias, "planned", "file.txt")
+
+        yield* Effect.promise(async () => {
+          await fs.mkdir(physical)
+          await fs.symlink(physical, alias, process.platform === "win32" ? "junction" : "dir")
+        })
+
+        const canonical = yield* Effect.promise(() => fs.realpath(physical))
+        expect(FSUtil.canonicalPath(target)).toBe(path.join(canonical, "planned", "file.txt"))
+      }),
+    )
   })
 })

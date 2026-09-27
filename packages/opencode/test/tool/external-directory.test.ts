@@ -4,11 +4,14 @@ import { describe, expect } from "bun:test"
 import path from "path"
 import { Effect } from "effect"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+import { FSUtil } from "@opencode-ai/core/fs-util"
 import type { Tool } from "@/tool/tool"
+import fs from "node:fs/promises"
 import { assertExternalDirectoryEffect } from "../../src/tool/external-directory"
+import { containsPath } from "../../src/project/instance-context"
+import { InstanceState } from "../../src/effect/instance-state"
 import { Filesystem } from "@/util/filesystem"
 import { TestInstance, tmpdirScoped } from "../fixture/fixture"
-import type { Permission } from "../../src/permission"
 import { SessionID, MessageID } from "../../src/session/schema"
 import { testEffect } from "../lib/effect"
 
@@ -39,6 +42,15 @@ function makeCtx() {
   return { requests, ctx }
 }
 
+const directoryLink = (target: string, link: string) =>
+  Effect.acquireRelease(
+    Effect.promise(async () => {
+      await fs.symlink(target, link, process.platform === "win32" ? "junction" : "dir")
+      return link
+    }),
+    (created) => Effect.promise(() => fs.rm(created, { recursive: true, force: true })),
+  )
+
 describe("tool.assertExternalDirectory", () => {
   it.live("no-ops for empty target", () =>
     Effect.gen(function* () {
@@ -58,6 +70,54 @@ describe("tool.assertExternalDirectory", () => {
       yield* assertExternalDirectoryEffect(ctx, path.join(test.directory, "file.txt"))
 
       expect(requests.length).toBe(0)
+    }),
+  )
+
+  it.instance("treats symlinked workspace paths as inside the instance", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const alias = yield* directoryLink(test.directory, `${test.directory}-link`)
+      const { requests, ctx } = makeCtx()
+      const existing = path.join(test.directory, "present.txt")
+      const missing = path.join(test.directory, "planned", "file.txt")
+
+      yield* Effect.promise(() => Bun.write(existing, "present"))
+      yield* assertExternalDirectoryEffect(ctx, existing)
+      yield* assertExternalDirectoryEffect(ctx, path.join(alias, "present.txt"))
+      yield* assertExternalDirectoryEffect(ctx, missing)
+      yield* assertExternalDirectoryEffect(ctx, path.join(alias, "planned", "file.txt"))
+
+      expect(requests).toHaveLength(0)
+      const instance = yield* InstanceState.context
+      expect(
+        containsPath(path.join(alias, "present.txt"), {
+          ...instance,
+          directory: path.join(test.directory, "nested"),
+          worktree: test.directory,
+        }),
+      ).toBe(true)
+    }),
+  )
+
+  it.instance("keeps true external paths external through workspace links", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const external = yield* tmpdirScoped()
+      const alias = yield* directoryLink(external, path.join(test.directory, "external-link"))
+      const target = path.join(external, "secret.txt")
+      const { requests, ctx } = makeCtx()
+
+      yield* Effect.promise(() => Bun.write(target, "secret"))
+      yield* assertExternalDirectoryEffect(ctx, target)
+      yield* assertExternalDirectoryEffect(ctx, path.join(alias, "secret.txt"))
+
+      const expected = glob(path.join(external, "*"))
+      expect(requests).toHaveLength(2)
+      expect(requests.map((request) => request.patterns)).toEqual([[expected], [expected]])
+      expect(requests.map((request) => request.metadata)).toEqual([
+        { filepath: target, parentDir: external },
+        { filepath: target, parentDir: external },
+      ])
     }),
   )
 
@@ -116,15 +176,13 @@ describe("tool.assertExternalDirectory", () => {
           yield* Effect.promise(() => Bun.write(path.join(outerTmp, "outside.txt"), "x"))
 
           const target = path.join(outerTmp, "outside.txt")
-          const alt = target
-            .replace(/^[A-Za-z]:/, "")
-            .replaceAll("\\", "/")
-            .toLowerCase()
+          const root = path.parse(target).root
+          const alt = `/${root[0].toLowerCase()}/${target.slice(root.length).replaceAll("\\", "/").toLowerCase()}`
 
           yield* assertExternalDirectoryEffect(ctx, alt)
 
           const req = requests.find((r) => r.permission === "external_directory")
-          const expected = glob(path.join(outerTmp, "*"))
+          const expected = glob(path.join(path.dirname(FSUtil.canonicalPath(target)), "*"))
           expect(req).toBeDefined()
           expect(req!.patterns).toEqual([expected])
           expect(req!.always).toEqual([expected])
